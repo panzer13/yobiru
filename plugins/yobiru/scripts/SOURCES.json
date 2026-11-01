@@ -4,7 +4,7 @@
   "files": {
     "scripts/tailmsg.py": {
       "source": "tailmsg.py",
-      "sha256": "fb0fd3296dd0d2457fed42191a4b62b0b233f7f7514ff37196fc39cc05a49963"
+      "sha256": "a89547e3641c5d12cb092bc8eae1599324e90a5e28974ebdd502183a5ef080f0"
     },
     "scripts/codex_bridge/CODEX_DISPATCHER.md": {
       "source": "CODEX_DISPATCHER.md",
@@ -44,7 +44,7 @@
     },
     "scripts/claude_bridge/CLAUDE_BRIDGE.md": {
       "source": "docs/CLAUDE_BRIDGE.md",
-      "sha256": "88357fe3305ea27c1f53a22655ea702b14adae1d702fe171f5c5440db8b19b47"
+      "sha256": "34864f153d4d6c5b4e6d961882a716d95e6aed66515ed817d299c152be2fbc35"
     },
     "scripts/claude_bridge/install_claude_bridge.py": {
       "source": "install_claude_bridge.py",
@@ -52,7 +52,7 @@
     },
     "docs/PUBLIC_BOTS.md": {
       "source": "docs/PUBLIC_BOTS.md",
-      "sha256": "23d485a1ec7925b5895d2f4399f3f9f155549b98970122e4d6afc2143593e087"
+      "sha256": "4150fda5b61fbc80fb4f88b85983aa3b334ab56282209630b7a1111539285af5"
     },
     "scripts/public_bots/bot_agents.py": {
       "source": "public_bots/bot_agents.py",
@@ -72,15 +72,15 @@
     },
     "scripts/public_bots/bot_common.py": {
       "source": "public_bots/bot_common.py",
-      "sha256": "d267d5e8890efa9d677be865685c670bb5d29a33008fc07ac192f789af22f85a"
+      "sha256": "0bbc5104da890ccfbe7a7a5dd0bd58a855d7a1e22df0b12a0754649f8e489011"
     },
     "scripts/public_bots/bot_e2e.py": {
       "source": "public_bots/bot_e2e.py",
-      "sha256": "a758dd54370fe2ec47c278814ef197fa17d7352e9912e4ad6fd69f6986914f7f"
+      "sha256": "25eb0a33c791796a965d02ca941390491e56d879dc33074735d59f561660210e"
     },
     "scripts/public_bots/bot_gateway.py": {
       "source": "public_bots/bot_gateway.py",
-      "sha256": "a1bb3af998a47c011f9f6a933e791fda374a65c21fea1adf28c2ae8227526f01"
+      "sha256": "2bdfc54662613c2033bfdd06812b9288d991b0cc7e0f4b22f4bd130df14aa146"
     },
     "scripts/public_bots/bot_links.py": {
       "source": "public_bots/bot_links.py",
@@ -92,7 +92,7 @@
     },
     "scripts/public_bots/bot_profile.py": {
       "source": "public_bots/bot_profile.py",
-      "sha256": "2f021d8d2b7d307b6251560af051adb29827c93d5941488f6944758a90f0feb5"
+      "sha256": "d8616c9fab5eecd80296ab4d63a757f39cec5ff5c8a265b40f729d4b5302464f"
     },
     "scripts/public_bots/bot_profile_i18n.py": {
       "source": "public_bots/bot_profile_i18n.py",
