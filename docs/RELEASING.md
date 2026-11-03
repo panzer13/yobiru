@@ -185,9 +185,10 @@ its setup, so that a change to it is reviewed like code. Each needs root on the 
 none is touched by a deploy.
 
 - `deploy/yobiru-gateway-capacity.conf`: a systemd drop-in for `yobiru-gateway.service` (CPU weight, threads, open
-  files, memory ceiling). Install it as `/etc/systemd/system/yobiru-gateway.service.d/capacity.conf`,
+  files, memory ceiling, `MALLOC_ARENA_MAX=2`). Install it as `/etc/systemd/system/yobiru-gateway.service.d/capacity.conf`,
   `systemctl daemon-reload`; it applies at the next restart. `systemctl show yobiru-gateway -p
-  CPUWeight,TasksMax,LimitNOFILE,MemoryHigh,MemoryMax` shows the values in force.
+  CPUWeight,TasksMax,LimitNOFILE,MemoryHigh,MemoryMax,Environment` shows the values in force. Without the arena cap
+  each request process grew by hundreds of MB a day (a thread per request, glibc's 8 arenas per core).
 - nginx: every held connector poll keeps two connections (Cloudflare to nginx, nginx to the gateway). In
   `/etc/nginx/nginx.conf`, `worker_rlimit_nofile 32768;` at the top level and `worker_connections 8192;` in
   `events` (the Ubuntu default is 768 per worker). In the `bots.yobiru.com` site, its own access log without the
@@ -220,6 +221,20 @@ none is touched by a deploy.
   -o /srv/yobiru-gateway/restore-test.sqlite3 /srv/yobiru-gateway/gw/gateway.sqlite3`, then check the copy with
   `PRAGMA integrity_check` and delete it. To undo: `systemctl disable --now yobiru-litestream`, remove the key from
   `gateway.json` and restart the gateway.
+- Operations report: `deploy/yobiru-gateway-report.py` takes a snapshot every two minutes for the twice-daily
+  report: counts from a read-only database connection (owners, bots, caller identities, totals 12 h, 1, 7 and 30 days
+  ago, new ones per day, active bots, mail and message backlog), connections held on the gateway port (the online
+  connectors), the gateway's memory and CPU, its units and backup timers, loopback probes of `/v1/health` and one
+  public card, request and error counts from the journal since the previous run, and nginx status counts. It keeps
+  8 days of samples in `/var/lib/yobiru-gateway-report` and uploads `latest.json` (plus one copy per day under
+  `daily/`) to the blob store's bucket under `ops/gateway-report/`, with the blob store's key. Only numbers, sizes,
+  timings and log lines with addresses and long tokens masked leave the server. As root:
+  `install -o root -g root -m 0755 deploy/yobiru-gateway-report.py /usr/local/sbin/yobiru-gateway-report`, copy
+  `deploy/yobiru-gateway-report.service` and `.timer` to `/etc/systemd/system/`, then `systemctl daemon-reload &&
+  systemctl enable --now yobiru-gateway-report.timer`. Check a run with `systemctl status yobiru-gateway-report` or
+  print a snapshot without writing anything: `runuser -u yobiru-gw -G adm -G systemd-journal --
+  /usr/local/sbin/yobiru-gateway-report --print`. To undo: `systemctl disable --now yobiru-gateway-report.timer`,
+  remove the three files and `/var/lib/yobiru-gateway-report`.
 
 ### Prereleases
 
