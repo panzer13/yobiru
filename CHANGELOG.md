@@ -1,13 +1,78 @@
 # Changelog
 
-## Unreleased
+## 0.7.25 (2026-11-08)
 
-Client only; the gateway needs no new code.
+Gateway and clients; update the gateway first. No schema change.
 
+- **An owner can delete a bot themselves.** `bot delete BOT --confirm @handle` (gateway: `POST
+  /v1/owner/bots/{id}/delete` with `{"confirm": "@handle"}`) removes the bot from the gateway for good, in one
+  transaction: its page (picture, links, agents), every credential and binding made for it (source, manager, worker,
+  connector and verifier credentials, its hosted wake), its follows, contacts and inbox acceptances in both
+  directions, and every conversation it had as the bot or as a caller of other bots. Pending work is cancelled,
+  bodies and attachments are overwritten before the rows go, and their decision receipts go with them; the bots and
+  callers it knew see it gone from their follows and contacts at once. The owner credential only (a manager
+  credential answers `403 bot_scoped`), with the handle repeated (`400 confirm_mismatch` otherwise). The handle stays
+  reserved to the owner, so an old share link never leads to someone else's bot, and the owner account stays: a
+  deleted bot no longer counts towards the self-enrolled bot quota. The client also forgets the bot's source
+  credential, end-to-end keys and bindings on that device. Until now removing a bot meant asking the maintainer
+  ([#87](https://github.com/chekusu/yobiru/issues/87)). Backups and copies others already received are not
+  affected; the [privacy policy](docs/PRIVACY.md) has a new effective date for this.
+- `enroll-bot --chekusu` and the guides say "your Yobiru account" instead of "your Chekusu account" (the option name
+  and partner id stay `chekusu`).
+
+## 0.7.24 (2026-11-07)
+
+Gateway only; clients need no update. No schema change.
+
+- **A job claim no longer gets slower with every turn of a long conversation.** A claim hands the agent the
+  conversation's newest earlier turns (`transcript_turns`, 20, within `transcript_chars`, 24000), but it read the body
+  of every earlier message first and kept only those. A scan sent to an agent as 100+ sealed page batches, each
+  megabytes in the blob store and together far more than its 64 MB cache, made every claim read all of them back from
+  R2. On 2026-11-07 claims outgrew the host's 15 s request limit: the gateway had granted a lease the host never
+  received, and 10 minutes later those batches were marked read without having been saved. Now the transcript is read
+  newest first and stops once it is full; older messages are checked by their metadata only (one more turn, or one
+  withheld, still makes it a `context_reset`), so a claim reads at most `transcript_turns` earlier bodies however long
+  the conversation is, fewer when `transcript_chars` fills first, and only one when the newest turn alone is over it.
+  Under the write lock the transcript asks the blob store for its newest turn on its own before any others. The
+  transcript an agent gets is unchanged.
+
+## 0.7.23 (2026-11-07)
+
+Clients only; the gateway needs no update. No schema change.
+
+- **Tailnet Lock support (read-only).** `doctor` now reports the Tailnet Lock state: off, this machine unsigned
+  (with the node key to sign), fewer than two signing keys, a signing device that also runs a woken agent, and
+  unsigned machines hidden from this one. New `lock status`, `lock setup` (prints the `tailscale lock init`/`add`
+  command for your signing devices) and `lock acl` (a recommended tailnet policy that limits assistant machines to
+  the receiver port). Nothing is ever signed or changed for you. See [Tailnet Lock](docs/TAILNET-LOCK.md).
+- `doctor` and `onboard` no longer stop with `PermissionError` on Linux hosts where `/workspace` is a symlink the
+  user cannot follow.
+
+## 0.7.22 (2026-11-07)
+
+Update the gateway, then clients. No schema change.
+
+- **A slow blob store no longer holds up every write on the gateway.** Large message bodies live in the blob
+  store (R2), and requests read and stored them while holding the database's write lock: a job poll, a job claim
+  (the body and its transcript), a send. On 2026-11-07 a job poll and, later, a job claim each held the lock for
+  30 s while an R2 call hung, and every other write gave up after 15 s with `503 storage_busy`. Now:
+  - **No blob store call under the write lock.** A write that needs bodies this process does not hold in memory
+    notes them all, is rolled back, reads them with no lock held and runs again; a new large body is stored before
+    the write that refers to it. One that ends without referring to it deletes it again. A slow store call delays
+    that one request only.
+  - **A worker's GETs read first**, like every other GET (`/v1/worker/jobs` above all). They took the write lock to
+    record the worker's last use; that is now recorded right after on its own, waiting at most 2 s for the lock
+    (best effort: the worker's next request records it otherwise).
 - **Sign in with the Chekusu account.** `enroll-bot URL --name N --chekusu` prints a link and a code; once the
   owner has signed in at login.chekusu.com, the same command again enrolls the bot (or joins the owner the address
   already belongs to). Chekusu is an ordinary email partner (`partners.chekusu` in `gateway.json`), so existing
   owners are found by their address. See [Signing in with the Chekusu account](docs/PUBLIC_BOTS.md#signing-in-with-the-chekusu-account---chekusu).
+- **Cross-agent tasks stay open until someone resolves them.** A Tailscale request that ended blocked, failed,
+  rejected or timed out no longer drops out of sight after `ack` or chat archival: `request list --open` lists the
+  unresolved tasks and `request resolve TASK_ID` closes one once the trusted owner has decided. A trusted local owner
+  can re-authorize blocked work as a new attempt (`request authorize`, `request attempt`, `request authorize-attempt`,
+  `request revoke`), guarded by a generation number; an old blocked request is never revived. `doctor` warns about
+  tasks that need attention.
 
 ## 0.7.21 (2026-11-02)
 
