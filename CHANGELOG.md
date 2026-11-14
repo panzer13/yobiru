@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.7.29 (2026-11-13)
+
+Clients only; the gateway is unchanged. The request ledger gains one column by itself when a 0.7.29 client or
+receiver first opens it.
+
+- **`request resolve --note` keeps its note.** 0.7.27 accepted the note and printed it once, but never stored it,
+  so it could not be seen again. The note (up to 500 characters) is now saved with the task and shown as
+  `resolution_note` in `request list` and `request status`. A later authorization that reopens the task clears it.
+- **`doctor` no longer counts requests whose task the owner resolved.** Resolving a task leaves its request's own
+  outcome (for example `timed_out`) as it is, so `doctor` kept listing those requests as awaiting a result and past
+  the deadline. Outgoing waiting, unknown-submission and overdue counts, and the incoming timed-out count, now leave
+  out requests whose task is resolved. Found when Grok Bot closed 14 expired requests after moving to its official
+  Tailscale plugin.
+
+## 0.7.28 (2026-11-13)
+
+Gateway only; clients need no update. No schema change.
+
+- **A request process that holds too much memory is replaced, without refusing or cutting a request.** With
+  `processes` above 1, the supervising process reads each request process's private memory every 30 seconds. Past
+  `limits.process_memory_mb` (512 by default; 0 turns it off) it starts a new request process first, then the old
+  one stops accepting, finishes what it holds (held connector polls included, at most a minute) and exits, while the
+  others keep accepting from the same port. One at a time; Linux only (it reads `/proc`). A backstop for memory that
+  keeps growing between releases: the official gateway's request processes hold between 100 and 250 MB each. The
+  report collector counts `request process N recycled` lines apart from crashes.
+- **A hosted wake's deadline holds whatever signal mask the gateway was started with.** The process that calls a
+  webhook ends itself with an alarm when the call (name lookup included) runs past `hosted_wake_timeout_seconds`.
+  It inherited its parent's signal mask, so under a supervisor or CI runner that blocks `SIGALRM` the alarm never
+  came and a stuck lookup outlived its deadline until maintenance killed it. It now unblocks `SIGALRM` first, and a
+  thread ends the process at the same deadline too, for systems where an expired alarm does not (seen on a macOS CI
+  runner).
+
+## 0.7.27 (2026-11-12)
+
+Grok Bot's computer only; receivers and the gateway are unchanged (receivers stay on 0.7.26 or later).
+
+- **The connector route dials the plugin's stand-in addresses.** The first live run on Grok Bot showed that its
+  official Tailscale plugin answers a MagicDNS name with a local stand-in address from the benchmarking range
+  (198.18.x.x) and carries the connection to that node; 0.7.26 accepted only 100.x/fd7a: tailnet addresses there, so
+  `doctor --peer` and `request send` stopped before connecting. On the connector route Yobiru now also dials
+  addresses in 198.18.0.0/15 for a full MagicDNS name (a real tailnet address is still preferred). The destination's
+  identity still comes from its own `/info` statement, pinned and re-checked before every connection; the local
+  route and receivers accept nothing new. `doctor --peer` says when it uses such an address.
+
 ## 0.7.26 (2026-11-11)
 
 Clients and receivers; the gateway is unchanged. No schema change. Upgrade the receivers Grok Bot should reach first.

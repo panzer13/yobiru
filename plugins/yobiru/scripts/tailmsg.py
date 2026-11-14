@@ -15,7 +15,7 @@ from pathlib import Path
 
 VERSION = 1                     # wire protocol version (unchanged)
 PRODUCT = "yobiru"
-PRODUCT_VERSION = "0.7.26"  # Yobiru release of this file; tools/build_plugin.py check keeps it in sync
+PRODUCT_VERSION = "0.7.29"  # Yobiru release of this file; tools/build_plugin.py check keeps it in sync
 DEFAULTS = {
     "port": 7766,
     "access_policy": "tailnet",    # authenticated Tailscale peers; use "allowlist" for opt-in restriction
@@ -45,6 +45,11 @@ DEFAULTS = {
 WAKE_LEVELS = ("none", "batch", "now")  # ascending
 WAKE_DEFAULT = "batch"
 TAILNET_NETS = [ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48")]
+# A host's managed Tailscale connector may answer MagicDNS names with local stand-in ("fake IP") addresses
+# from the benchmarking range (RFC 2544, never routed on the Internet) and carry each connection to the named
+# node; Grok Bot's official Tailscale plugin answers 198.18.x.x. Only the connector route dials them, and the
+# destination's identity still comes from its own pinned /info statement (SPEC §9.1).
+CONNECTOR_NETS = [ipaddress.ip_network("198.18.0.0/15")]
 ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}\Z")      # \Z, not $: "$" would also accept a trailing newline
 MSG_REF_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")  # a message id or a unique prefix of one (CLI input)
 INBOX_PREVIEW = 500                                 # characters of text per `inbox --json` row
@@ -258,14 +263,21 @@ def durable_write(path, data):
         if temporary.exists():
             temporary.unlink()
 
-def is_tailnet_ip(ip):
+def ip_in(ip, nets):
     try:
         a = ipaddress.ip_address(ip.split("%")[0])
-    except ValueError:
+    except (AttributeError, ValueError):
         return False
     if getattr(a, "ipv4_mapped", None):
         a = a.ipv4_mapped
-    return any(a in n for n in TAILNET_NETS)
+    return any(a in n for n in nets)
+
+def is_tailnet_ip(ip):
+    return ip_in(ip, TAILNET_NETS)
+
+def is_connector_ip(ip):
+    """A host connector's stand-in address for a MagicDNS name (CONNECTOR_NETS); never a tailnet address."""
+    return ip_in(ip, CONNECTOR_NETS)
 
 def select_peer(nodes, peer):
     """Resolve a name from a fresh normalized Tailscale snapshot, never by list order.
@@ -457,7 +469,8 @@ def parse_config(raw):
 
 
 def connector_resolve(peer):
-    """Connector route: a receiver's full MagicDNS name -> (name, tailnet address), through the host's DNS.
+    """Connector route: a receiver's full MagicDNS name -> (name, address to dial), through the host's DNS:
+    a tailnet address, or else the connector's stand-in address for that name (CONNECTOR_NETS).
     Short names and bare addresses are refused: the name is the identity the receiver must confirm."""
     name = str(peer).strip().lower().rstrip(".")
     if not MAGICDNS_RE.fullmatch(name):
@@ -468,13 +481,16 @@ def connector_resolve(peer):
     except (OSError, UnicodeError) as exc:
         raise RuntimeError("the host's Tailscale connector did not resolve %s (%s); check that this host's "
                            "Tailscale connection is on and that the name is right" % (name, exc)) from exc
-    ips = []
+    tailnet, stand_in, other = [], [], []
     for item in found:
         ip = str(item[4][0])
-        if is_tailnet_ip(ip) and ip not in ips:
-            ips.append(ip)
+        bucket = tailnet if is_tailnet_ip(ip) else stand_in if is_connector_ip(ip) else other
+        if ip not in bucket:
+            bucket.append(ip)
+    ips = tailnet or stand_in
     if not ips:
-        raise RuntimeError("%s did not resolve to a Tailscale address through this host's connector" % name)
+        raise RuntimeError("%s did not resolve to a Tailscale address or to this host connector's address for it "
+                           "(got %s)" % (name, ", ".join(other[:3]) or "nothing"))
     v4 = [ip for ip in ips if ":" not in ip]
     return name, (v4 or ips)[0]
 
@@ -520,6 +536,11 @@ class Ctx:
         connector (for example Grok Bot's official Tailscale plugin), with no local Tailscale client."""
         return self.cfg.get("tailnet_route") == "connector"
 
+    def dialable(self, ip):
+        """An address this computer may dial for a peer: a tailnet address, or on the connector route the
+        host connector's stand-in address for a MagicDNS name."""
+        return is_tailnet_ip(ip) or (self.connector() and is_connector_ip(ip))
+
     def connector_whois(self, ip, port):
         """Connector route: the destination's identity as the destination itself states it in /info, and this
         computer's identity as the destination's own Tailscale sees it. The destination still authenticates
@@ -543,8 +564,11 @@ class Ctx:
         caller_node = caller.get("node") if isinstance(caller.get("node"), str) else ""
         self.connector_self = {"node": caller_node.rstrip(".").lower(), "stable_id": mine, "ips": []}
         node = node.rstrip(".").lower()
-        return {"ip": ip, "node": node, "host": node.split(".")[0], "tags": [], "user": "",
-                "stable_id": stable, "dns_name": node}
+        ident = {"node": node, "host": node.split(".")[0], "tags": [], "user": "", "stable_id": stable,
+                 "dns_name": node}
+        if is_tailnet_ip(ip):          # a connector's stand-in address is no attribute of the destination
+            ident["ip"] = ip
+        return ident
 
     def native_name(self, binding):
         """Read-only native session name for a bound session, cached (bounded subprocess cost)."""
@@ -933,7 +957,7 @@ def request_db(ctx):
                 attention TEXT NOT NULL DEFAULT 'none', new_result INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL, resolved_at TEXT, resolved_by TEXT,
                 generation INTEGER NOT NULL DEFAULT 0, current_authorization_id TEXT,
-                current_attempt_id TEXT, owner_kind TEXT, owner_id TEXT);
+                current_attempt_id TEXT, owner_kind TEXT, owner_id TEXT, resolution_note TEXT);
             CREATE UNIQUE INDEX IF NOT EXISTS tasks_client_ref_idx ON tasks(client_ref)
                 WHERE client_ref IS NOT NULL;
             CREATE TABLE IF NOT EXISTS task_requests (
@@ -994,7 +1018,7 @@ def _ensure_task_authorization_schema(db):
         task_cols = table_columns(db, "tasks")
         for column, definition in (
                 ("current_authorization_id", "TEXT"), ("current_attempt_id", "TEXT"),
-                ("owner_kind", "TEXT"), ("owner_id", "TEXT")):
+                ("owner_kind", "TEXT"), ("owner_id", "TEXT"), ("resolution_note", "TEXT")):
             if column not in task_cols:
                 db.execute("ALTER TABLE tasks ADD COLUMN %s %s" % (column, definition))
         request_cols = table_columns(db, "task_requests")
@@ -1183,7 +1207,8 @@ def _set_task_current_attempt(db, task_id, attempt_id, generation, authorization
     resolution, attention, _ = task_state_for_request(state)
     stamp = iso(now_utc())
     db.execute("UPDATE tasks SET resolution=?, attention=?, new_result=0, updated_at=?, resolved_at=NULL, "
-               "resolved_by=NULL, current_attempt_id=?, current_authorization_id=?, generation=? WHERE task_id=?",
+               "resolved_by=NULL, resolution_note=NULL, current_attempt_id=?, current_authorization_id=?, generation=? "
+               "WHERE task_id=?",
                (resolution, attention, stamp, attempt_id, authorization_id, generation, task_id))
 
 
@@ -1258,8 +1283,9 @@ def task_sync(db, direction, request_id, state, stamp=None):
         return
     db.execute("UPDATE tasks SET resolution=?, attention=?, new_result=MAX(new_result,?), updated_at=?, "
                "resolved_at=CASE WHEN ?='resolved' THEN COALESCE(resolved_at,?) ELSE NULL END, "
-               "resolved_by=CASE WHEN ?='resolved' THEN resolved_by ELSE NULL END WHERE task_id=?",
-               (resolution, attention, result, stamp, resolution, stamp, resolution, link["task_id"]))
+               "resolved_by=CASE WHEN ?='resolved' THEN resolved_by ELSE NULL END, "
+               "resolution_note=CASE WHEN ?='resolved' THEN resolution_note ELSE NULL END WHERE task_id=?",
+               (resolution, attention, result, stamp, resolution, stamp, resolution, resolution, link["task_id"]))
 
 
 def backfill_tasks(db):
@@ -1365,12 +1391,14 @@ def task_view(db, task_id, rows, task=None):
         resolution, attention, new_result = task["resolution"], task["attention"], bool(task["new_result"])
         created_at, updated_at = task["created_at"], task["updated_at"]
         resolved_at, resolved_by, generation = task["resolved_at"], task["resolved_by"], task["generation"]
+        resolution_note = (task["resolution_note"] if resolution == "resolved" and "resolution_note" in task.keys()
+                           else None)
     else:
         resolution, attention, new_result = task_state_for_request(latest["state"])
         client_ref = None
         created_at = updated_at = _stamp(latest["deadline"])
         resolved_at = created_at if resolution == "resolved" else None
-        resolved_by, generation = None, 0
+        resolved_by, generation, resolution_note = None, 0, None
     # `task_state_for_request` returns a tuple; normalize the derived result to the public boolean form.
     if not task:
         new_result = bool(new_result)
@@ -1404,6 +1432,7 @@ def task_view(db, task_id, rows, task=None):
     return {"task_id": task_id, "client_ref": client_ref, "resolution": resolution, "attention": attention,
             "new_result": new_result, "generation": generation, "created_at": created_at,
             "updated_at": updated_at, "resolved_at": resolved_at, "resolved_by": resolved_by,
+            "resolution_note": resolution_note,
             "attempt_count": (db.execute("SELECT COUNT(*) FROM task_attempts WHERE task_id=?", (task_id,)).fetchone()[0]
                               if has_attempts else len(rows)),
             "latest_request_id": latest_request_id, "latest_direction": latest_direction,
@@ -1591,7 +1620,7 @@ def authorize_task(ctx, task_id, scope, target_agent=None, target_host=None, exp
                     target_host, generation, issued_at, expiry, issued_at, task_revision_digest,
                     proposed_revision_digest, source_ref, source_digest))
         db.execute("UPDATE tasks SET generation=?, current_authorization_id=?, resolution='open', attention='none', "
-                   "updated_at=?, resolved_at=NULL, resolved_by=NULL WHERE task_id=? AND generation=?",
+                   "updated_at=?, resolved_at=NULL, resolved_by=NULL, resolution_note=NULL WHERE task_id=? AND generation=?",
                    (generation, authorization_id, issued_at, task_id, current))
         if db.execute("SELECT changes()").fetchone()[0] != 1:
             raise ValueError("authorization generation changed concurrently")
@@ -1755,7 +1784,7 @@ def authorize_and_create_task_attempt(ctx, task_id, scope, target_agent=None, ta
                    "VALUES(?,?,?,?,?,?,?,?)", (_attempt_id("event"), authorization_id, task_id, "consumed", generation,
                                                  issued_at, "local-owner", json_canonical({"attempt_id": attempt_id})))
         db.execute("UPDATE tasks SET generation=?, current_authorization_id=?, current_attempt_id=?, resolution='open', "
-                   "attention='none', new_result=0, updated_at=?, resolved_at=NULL, resolved_by=NULL "
+                   "attention='none', new_result=0, updated_at=?, resolved_at=NULL, resolved_by=NULL, resolution_note=NULL "
                    "WHERE task_id=? AND generation=?", (generation, authorization_id, attempt_id, issued_at, task_id, current))
         if db.execute("SELECT changes()").fetchone()[0] != 1:
             raise ValueError("authorization generation changed concurrently")
@@ -1795,9 +1824,10 @@ def transition_task_attempt(ctx, attempt_id, state, text=None, expected_generati
         resolution, attention, result = task_state_for_request(state)
         db.execute("UPDATE tasks SET resolution=?, attention=?, new_result=MAX(new_result,?), updated_at=?, "
                    "resolved_at=CASE WHEN ?='resolved' THEN COALESCE(resolved_at,?) ELSE NULL END, "
-                   "resolved_by=CASE WHEN ?='resolved' THEN resolved_by ELSE NULL END "
+                   "resolved_by=CASE WHEN ?='resolved' THEN resolved_by ELSE NULL END, "
+                   "resolution_note=CASE WHEN ?='resolved' THEN resolution_note ELSE NULL END "
                    "WHERE task_id=? AND current_attempt_id=? AND generation=?",
-                   (resolution, attention, result, stamp, resolution, stamp, resolution, task["task_id"],
+                   (resolution, attention, result, stamp, resolution, stamp, resolution, resolution, task["task_id"],
                     attempt_id, generation))
         return {"task_id": attempt["task_id"], "attempt_id": attempt_id, "generation": generation,
                 "state": state, "result_text": text, "resolution": resolution, "attention": attention}
@@ -1829,12 +1859,13 @@ def resolve_task(ctx, task_id, by=None, note=None, expected_generation=None):
             if current and current["state"] in ("pending", "received", "running", "cancel_requested"):
                 raise ValueError("cannot resolve an active attempt")
         stamp = iso(now_utc())
-        db.execute("UPDATE tasks SET resolution='resolved', attention='none', updated_at=?, resolved_at=?, resolved_by=? "
-                   "WHERE task_id=?", (stamp, stamp, by or "local-user", task_id))
+        note = note[:500] if note else None
+        db.execute("UPDATE tasks SET resolution='resolved', attention='none', updated_at=?, resolved_at=?, resolved_by=?, "
+                   "resolution_note=? WHERE task_id=?", (stamp, stamp, by or "local-user", note, task_id))
         item = {"task_id": task_id, "resolution": "resolved", "attention": "none", "resolved_at": stamp,
-                "resolved_by": by or "local-user"}
+                "resolved_by": by or "local-user", "resolution_note": note}
         if note:
-            item["note"] = note[:500]
+            item["note"] = note
         return item
 
 
@@ -2232,6 +2263,13 @@ def request_backlog(home, now=None):
         columns = table_columns(db, "requests")
         lifecycle = set(LIFECYCLE_COLUMNS) <= columns
         one = lambda sql, *args: db.execute(sql, args).fetchone()[0]
+        # A request whose task the owner closed with `request resolve` is settled: its request row keeps its
+        # outcome (for example timed_out), but it no longer counts as waiting or overdue work.
+        has_tasks = {"tasks", "task_requests"} <= {r[0] for r in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('tasks','task_requests')")}
+        open_task = (" AND NOT EXISTS (SELECT 1 FROM task_requests tr JOIN tasks t ON t.task_id=tr.task_id "
+                     "WHERE tr.direction=requests.direction AND tr.request_id=requests.id "
+                     "AND t.resolution='resolved')") if has_tasks else ""
         incoming = {
             "unstarted": one("SELECT COUNT(*) FROM requests WHERE direction='incoming' AND state='received' "
                              "AND deadline>?", stamp),
@@ -2239,7 +2277,8 @@ def request_backlog(home, now=None):
                            "AND deadline>?", stamp),
             "overdue_not_persisted": one("SELECT COUNT(*) FROM requests WHERE direction='incoming' "
                                          "AND state IN ('received','running') AND deadline<=?", stamp),
-            "timed_out": one("SELECT COUNT(*) FROM requests WHERE direction='incoming' AND state='timed_out'"),
+            "timed_out": one("SELECT COUNT(*) FROM requests WHERE direction='incoming' AND state='timed_out'"
+                             + open_task),
             "final": one("SELECT COUNT(*) FROM requests WHERE direction='incoming' AND state IN %s" % final),
             "lifecycle_columns": lifecycle}
         if lifecycle:              # only well-formed stored times take part in the minimum
@@ -2290,11 +2329,11 @@ def request_backlog(home, now=None):
             responses["errors"][key] = responses["errors"].get(key, 0) + count
         outgoing = {
             "awaiting_result": one("SELECT COUNT(*) FROM requests WHERE direction='outgoing' AND state NOT IN %s"
-                                   % final),
+                                   % final + open_task),
             "submission_unknown": one("SELECT COUNT(*) FROM requests WHERE direction='outgoing' "
-                                      "AND submission='unknown' AND state NOT IN %s" % final),
+                                      "AND submission='unknown' AND state NOT IN %s" % final + open_task),
             "overdue": one("SELECT COUNT(*) FROM requests WHERE direction='outgoing' AND state NOT IN %s "
-                           "AND deadline<=?" % final, stamp)}
+                           "AND deadline<=?" % final + open_task, stamp)}
         tasks = task_backlog(db, now)
         db.rollback()
     except sqlite3.Error as exc:
@@ -4334,7 +4373,7 @@ def cmd_fetch(ctx, a):
                 print("OK    %s (already fetched)" % name)
                 continue
             _, ip = ctx.resolve(u.hostname)
-            if not is_tailnet_ip(ip):
+            if not ctx.dialable(ip):
                 raise RuntimeError("resolved to non-tailnet ip %s" % ip)
             if env.get("response") and env.get("reply_to"):
                 with request_db(ctx) as db:
